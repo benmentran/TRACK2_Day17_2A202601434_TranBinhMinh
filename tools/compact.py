@@ -1,43 +1,37 @@
 #!/usr/bin/env python3
-"""Tái cấu trúc dataset Parquet của dashboard — NHIỆM VỤ 4.  CHƯA CÓ LOGIC.
+"""Tái cấu trúc dataset Parquet của dashboard — BÀI MỞ RỘNG A (EXTRA.md).
 
-Hiện trạng: `data/gold_events/` gồm 5.000 file, mỗi file vài chục KB, không
-partition, thứ tự hàng ngẫu nhiên.
-
-Yêu cầu: đọc toàn bộ dataset cũ, ghi ra dataset mới có layout hợp lý hơn, sau đó cập
-nhật `queries/dashboard.sql` để trỏ vào dataset mới.
+Hiện trạng: `data/gold_events/` gồm 5.000 file nhỏ, không partition, thứ tự
+hàng ngẫu nhiên. Query dashboard lọc theo (customer_name, event_time) phải mở
+cả 5.000 file: rows scanned = 5.000.000, dù dữ liệu thật chỉ 130.683 hàng.
 
     python tools/compact.py       # ghi dataset mới
     python tools/explain.py       # đo lại và so với baseline
 
-KHUNG THỰC HIỆN
+BA QUYẾT ĐỊNH THIẾT KẾ (và lý do):
 
-    COPY (
-        SELECT *
-        FROM   read_parquet('data/gold_events/*.parquet')
-        ORDER  BY <cột A>, <cột B>
-    ) TO 'data/gold_events_v2' (
-        FORMAT          parquet,
-        PARTITION_BY    (<cột partition>),
-        OVERWRITE_OR_IGNORE,
-        ROW_GROUP_SIZE  <?>
-    )
+  1. <cột partition> = event_date
+     Dashboard lọc theo HAI cột: customer_name (= 650 giá trị phân biệt)
+     và ngày (strftime(event_time, ...)). Partition theo customer_name tạo
+     650 thư mục — mỗi thư mục vài chục KB, và vì MỌI file đều chứa đủ 14
+     ngày nên điều kiện ngày không còn chỗ nào để bỏ qua file.
+     Partition theo event_date chỉ tạo 14 thư mục, mỗi thư mục đúng một
+     ngày (~9.300 hàng): engine biết file nào cần mở NGAY TỪ ĐƯỜNG DẪN,
+     không cần mở file rồi mới lọc. Điều kiện customer_name được lọc trong
+     file — file một ngày chỉ ~9.300 hàng, vừa tầm.
 
-Ba quyết định, mỗi quyết định cần một lý do viết được ra giấy:
+  2. <cột A>, <cột B> = customer_name, event_time
+     Thứ tự hàng quyết định thống kê min/max của mỗi row group có ích hay
+     vô dụng. Sắp theo customer_name để các hàng cùng một khách hàng nằm
+     liền nhau → min/max của customer_name trong mỗi row group sát nhau,
+     bộ lọc khách hàng có dữ liệu để bỏ qua row group không chứa khách đó.
+     Trong cùng khách, sắp theo event_time cho min/max thời gian sát.
 
-  <cột partition>   Engine chỉ bỏ qua được file mà nó biết là vô ích TRƯỚC khi
-                    mở file. Thông tin đó đến từ đường dẫn. Vậy cột nào của
-                    truy vấn dashboard nên xuất hiện trong tên thư mục? Cột đó
-                    có bao nhiêu giá trị phân biệt — tức bao nhiêu thư mục?
-                    Partition theo cột có 650 giá trị thì hệ quả là gì?
-
-  <cột A>, <cột B>  Thứ tự hàng trong file quyết định thống kê min/max của mỗi
-                    row group có ích hay vô dụng. Sắp thế nào để các hàng cùng
-                    một khách hàng nằm liền nhau?
-
-  ROW_GROUP_SIZE    Mặc định 122.880 hàng. Một ngày có khoảng bao nhiêu hàng?
-                    Nếu cả ngày gói gọn trong MỘT row group thì min/max của
-                    row group đó phủ những gì, và còn tác dụng lọc không?
+  3. ROW_GROUP_SIZE = 2.048
+     Một ngày có ~9.300 hàng. Mặc định 122.880 hàng/row group gói cả ngày
+     vào MỘT row group — min/max phủ toàn bộ, bộ lọc customer_name không
+     bỏ được phần nào. Row group 2.048 hàng giữ min/max đủ nhỏ để lọc theo
+     khách hàng có tác dụng ở mức row group.
 
 Sau khi chạy xong, kiểm tra lại bằng `python tools/explain.py`: `rows scanned`
 phải giảm, `files` phải giảm, và `result hash` phải GIỮ NGUYÊN.
@@ -59,31 +53,44 @@ DST = DATA / "gold_events_v2"
 
 def main() -> int:
     con = duckdb.connect()
+    # 1 luồng → mỗi partition đúng 1 file, output ổn định giữa các lần chạy.
+    con.execute("set threads = 1")
+
+    src_glob = str(SRC).replace("\\", "/") + "/*.parquet"
+    dst_path = str(DST).replace("\\", "/")
 
     n_src = len(list(SRC.glob("*.parquet")))
     print(f"  nguồn : {SRC}  ({n_src:,} file)")
 
-    # TODO(nhiệm vụ 4): hiện thực khung COPY ... TO ... ở phần docstring.
-    #
-    #   con.execute(f"""
-    #       copy (
-    #           select * from read_parquet('{SRC}/*.parquet')
-    #           order by ...
-    #       ) to '{DST}' (
-    #           format parquet,
-    #           partition_by (...),
-    #           overwrite_or_ignore,
-    #           row_group_size ...
-    #       )
-    #   """)
-    #
-    # Sau đó kiểm tra không mất hàng nào:
-    #
-    #   assert <số row dataset cũ> == <số row dataset mới>
+    n_before = con.execute(
+        f"select count(*) from read_parquet('{src_glob}')"
+    ).fetchone()[0]
 
-    print("\n  tools/compact.py chưa được hiện thực — đây là nhiệm vụ 4.")
-    print("  Mở file này, đọc phần KHUNG THỰC HIỆN ở đầu file và điền vào TODO.")
-    print("  Hướng dẫn từng bước: GUIDE.md mục 4.\n")
+    con.execute(f"""
+        copy (
+            select
+                event_id, ticket_id, customer_id, customer_name, segment,
+                event_type, model, latency_ms, tokens_in, tokens_out,
+                is_escalated, event_time, event_date
+            from read_parquet('{src_glob}')
+            order by customer_name, event_time
+        ) to '{dst_path}' (
+            format parquet,
+            partition_by (event_date),
+            overwrite_or_ignore,
+            row_group_size 2048
+        )
+    """)
+
+    n_after = con.execute(
+        f"select count(*) from read_parquet('{dst_path}/**/*.parquet')"
+    ).fetchone()[0]
+
+    # Không được mất hàng nào khi tái cấu trúc.
+    assert n_before == n_after, f"mất hàng: {n_before:,} → {n_after:,}"
+    n_files = len(list(DST.glob("*/**/*.parquet")))
+    print(f"  đích  : {DST}  ({n_files:,} file · {n_after:,} hàng)")
+    print("  xong. Chạy `python tools/explain.py` để đo lại.")
     return 0
 
 
