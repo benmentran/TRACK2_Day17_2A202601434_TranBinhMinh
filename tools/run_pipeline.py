@@ -19,10 +19,28 @@ import argparse
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
+
+def _ensure_utf8_mode() -> None:
+    """dbt đọc file dự án bằng encoding mặc định (cp1252 trên Windows), trong khi
+    project chứa tiếng Việt UTF-8 → UnicodeDecodeError. Chạy lại interpreter với
+    PYTHONUTF8=1 để mặc định là UTF-8. Dùng subprocess.call (không phải os.execv)
+    để tiến trình cha đợi con xong — os.execv trên Windows khiến shell quay lại
+    ngay, gây race khi mở warehouse.duckdb."""
+    if sys.flags.utf8_mode:
+        return
+    os.environ["PYTHONUTF8"] = "1"
+    code = subprocess.call([sys.executable] + sys.argv)
+    sys.exit(code)
+
+
+if __name__ == "__main__":
+    _ensure_utf8_mode()
 
 from ingest.load_bronze import load_day  # noqa: E402
 from tools.common import DBT_DIR, RUN_DATES, WAREHOUSE, connect  # noqa: E402

@@ -45,16 +45,23 @@
 #}
 
 {% macro normalize_priority(col) %}
-    -- TODO(nhiệm vụ 3): thay biểu thức dưới đây bằng một khối CASE xử lý
-    -- đủ ba nhóm ở trên.
+    -- Ba nhóm giá trị nguồn, ba cách xử lý khác nhau:
+    --   Nhóm 1  '1' '2' '3' '4'              đúng contract cũ  -> giữ nguyên
+    --   Nhóm 2  'urgent' 'high' 'medium' 'low'
+    --          đổi cách ghi từ 08-10, ý nghĩa không đổi         -> quy về số
+    --   Nhóm 3  'P1' 'P2' 'unknown' '0' '5' '-1' '' NULL
+    --          dữ liệu hỏng thật                                 -> null
     --
-    --     case
-    --         when <nhóm 1: đã là số hợp lệ>  then <giữ nguyên>
-    --         when <nhóm 2: nhãn chữ>         then <số tương ứng>
-    --         ...
-    --         else null                        -- nhóm 3
-    --     end
-    try_cast({{ col }} as integer)
+    -- Lưu ý: so sánh chuỗi chứ KHÔNG phải so sánh số, nên '0', '5', '-1'
+    -- không thể lọt vào nhóm 1 dù chúng đúng là số.
+    case
+        when {{ col }} in ('1', '2', '3', '4')  then cast({{ col }} as integer)
+        when lower({{ col }}) = 'urgent'        then 1
+        when lower({{ col }}) = 'high'          then 2
+        when lower({{ col }}) = 'medium'        then 3
+        when lower({{ col }}) = 'low'           then 4
+        else null
+    end
 {% endmacro %}
 
 
@@ -64,6 +71,12 @@
     hơn (rỗng / NULL / là số nhưng ngoài khoảng / là chuỗi lạ).
 #}
 {% macro priority_reject_reason(col) %}
-    -- TODO(nhiệm vụ 3, không bắt buộc): phân biệt các loại lỗi khác nhau.
-    'priority không quy đổi được về 1..4'
+    -- Phân biệt các loại lỗi để người trực biết dữ liệu hỏng theo kiểu nào.
+    case
+        when {{ col }} is null then 'priority là NULL'
+        when {{ col }} = ''    then 'priority rỗng (chuỗi trống)'
+        when {{ col }} ~ '^[+-]?[0-9]+$'
+            then 'priority là số nhưng ngoài khoảng 1..4'
+        else 'priority là chuỗi lạ, không quy đổi được về 1..4'
+    end
 {% endmacro %}

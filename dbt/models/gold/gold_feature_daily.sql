@@ -1,37 +1,31 @@
 -- ---------------------------------------------------------------------------
 -- gold_feature_daily — đặc trưng theo ngày cho agent định tuyến.
 -- Grain: 1 hàng / 1 cặp (event_date, customer_id).
--- ---------------------------------------------------------------------------
--- KHUNG THỰC HIỆN — NHIỆM VỤ 2
 --
---   Mỗi ngày vận hành, model chỉ tính lại phần "mới". Định nghĩa "mới" nằm ở
---   khối is_incremental() bên dưới:
+-- SỰ CỐ #1043 — KHẮC PHỤC NHIỆM VỤ 2
 --
---       WHERE event_date <toán tử> (
---                 SELECT max(event_date) FROM <bảng đích>
---             ) <lùi lại bao nhiêu ngày?>
+--   Đo trên bronze_events (14 ngày): P99(_ingested_at - event_time) = 2,73
+--   ngày, max = 2,94 ngày, ~5% bản ghi tới kho muộn hơn 1 ngày.
 --
---   Câu hỏi cần trả lời trước khi sửa:
---     1. Đo phân bố của (_ingested_at - event_time) trong bronze_events.
---        P99 bằng bao nhiêu? Bao nhiêu phần trăm bản ghi tới kho muộn hơn
---        một ngày so với lúc sự kiện xảy ra?
---     2. Một bản ghi có event_date = 08-12 nhưng _ingested_at = 08-15: hôm
---        08-15, max(event_date) trong bảng đích đang là bao nhiêu? Bản ghi
---        đó có thoả điều kiện lọc hiện tại không? Ngày hôm sau thì sao?
---     3. Window tính lại nên lùi bao nhiêu ngày? Căn cứ vào P99 hay vào max?
---        Mỗi ngày lùi thêm phải trả giá gì ở MỌI lượt chạy sau này?
---     4. Khi window mở rộng, cùng một (event_date, customer_id) sẽ được tính
---        lại nhiều lần. Cần thêm gì vào config() để lần tính sau THAY THẾ
---        lần tính trước thay vì cộng dồn? Grain này có mấy cột khoá?
+--   Lỗi cũ: `where event_date > (select max(event_date) from this)` — chỉ
+--   nhận event_date MỚI hơn ngày lớn nhất đã có. Một event xảy ra 08-12 tới
+--   kho 08-15: lượt 08-15 max(event_date) đã là 08-14 → bị loại; lượt 08-16
+--   max là 08-15 → vẫn bị loại. Không bao giờ được xử lý.
 --
---   Cảnh báo: sửa điều kiện lọc mà không xử lý ý 4 sẽ làm bảng mất tính ổn
---   định — make verify in riêng hai cột "ỔN ĐỊNH" và "SỐ HÀNG" để bạn thấy
---   rõ hai vấn đề này tách nhau.
+--   Sửa hai chỗ, phải đi cùng nhau:
+--     1. Lookback 3 ngày (theo P99 = 2,73 ngày, không theo max vì max nhạy
+--        với outlier; mỗi ngày lùi thêm phải trả phí quét lại ngày đó ở MỌI
+--        lượt chạy sau này).
+--     2. unique_key 2 cột (event_date, customer_id) + merge — window rộng
+--        làm cùng một cặp bị tính lại nhiều lần, merge THAY THẾ thay vì
+--        cộng dồn như insert.
 -- ---------------------------------------------------------------------------
 
 {{ config(
-    materialized     = 'incremental',
-    on_schema_change = 'fail'
+    materialized          = 'incremental',
+    unique_key            = ['event_date', 'customer_id'],
+    incremental_strategy  = 'merge',
+    on_schema_change      = 'fail'
 ) }}
 
 select
@@ -49,7 +43,9 @@ select
 from {{ ref('silver_events') }}
 
 {% if is_incremental() %}
-where event_date > (select max(event_date) from {{ this }})
+-- Lookback 3 ngày (P99 = 2,73 ngày): xử lý cả những event tới kho muộn,
+-- và merge theo (event_date, customer_id) để lần tính sau thay thế lần trước.
+where event_date > (select max(event_date) from {{ this }}) - interval '3 days'
 {% endif %}
 
 group by 1, 2, 3, 4

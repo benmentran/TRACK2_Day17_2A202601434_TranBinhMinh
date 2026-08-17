@@ -35,8 +35,20 @@
 
 {{ config(materialized = 'table') }}
 
-with ranked as (
+with valid as (
 
+    -- 1) LỌC BẢN GHI hỏng TRƯỚC: bản ghi nào priority không chuẩn hoá được
+    --    (macro trả NULL) thì loại khỏi luồng, ticket không bị ảnh hưởng.
+    select *
+    from {{ source('bronze', 'bronze_tickets_cdc') }}
+    where {{ normalize_priority('priority_raw') }} is not null
+
+),
+
+ranked as (
+
+    -- 2) XẾP HẠNG SAU: trong số bản ghi còn hợp lệ, mỗi ticket lấy bản ghi
+    --    có (event_time, cdc_seq) lớn nhất.
     select
         *,
         {{ normalize_priority('priority_raw') }}             as priority_clean,
@@ -44,7 +56,7 @@ with ranked as (
             partition by ticket_id
             order by event_time desc, cdc_seq desc
         ) as _rn
-    from {{ source('bronze', 'bronze_tickets_cdc') }}
+    from valid
 
 ),
 

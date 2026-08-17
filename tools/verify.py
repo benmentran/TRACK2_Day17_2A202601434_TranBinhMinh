@@ -29,7 +29,9 @@ from tools.common import (  # noqa: E402
     DBT_DIR, EXPECTED, GOLD_TABLES, WAREHOUSE, checksum, connect,
     expected_counts, fmt, row_count, table_exists,
 )
-from tools.run_pipeline import reset_warehouse, run_once  # noqa: E402
+from tools.run_pipeline import (  # noqa: E402
+    _ensure_utf8_mode, reset_warehouse, run_once,
+)
 
 OK, BAD, DASH = "✓", "✗", "—"
 
@@ -149,6 +151,8 @@ def dashboard_check() -> dict:
 
 # ------------------------------------------------------------------- main
 def main() -> int:
+    _ensure_utf8_mode()
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", type=int, default=3)
     ap.add_argument("--no-reset", action="store_true")
